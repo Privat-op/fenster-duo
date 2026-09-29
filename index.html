@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fenster-Duo</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%236ea8ff'/></svg>">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0f1a; color: #e8ecf4;
+    font-family: "Segoe UI", system-ui, sans-serif; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .hud { position: fixed; top: 18px; left: 22px; background: rgba(15,20,34,.72);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 14px 18px;
+    backdrop-filter: blur(8px); font-size: 13px; line-height: 1.55; min-width: 250px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.45); user-select: none; }
+  .hud h1 { font-size: 14px; letter-spacing: .12em; text-transform: uppercase; color: #8fa7ff; margin-bottom: 6px; }
+  .rolle { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 700; color: #0b0f1a; }
+  .links  { background: #6ea8ff; }
+  .mitte  { background: #ffd166; }
+  .rechts { background: #63e6a9; }
+  .dim { color: #93a0b5; }
+  .legende { color: #7c8aa0; font-size: 11px; line-height: 1.5; margin-top: 8px;
+    border-top: 1px solid rgba(255,255,255,.08); padding-top: 6px; }
+  #hinweis { position: fixed; bottom: 20px; left: 0; right: 0; text-align: center;
+    color: #ffd166; font-size: 13px; font-weight: 600; user-select: none; pointer-events: none;
+    opacity: 0; transition: opacity .25s; }
+  .sichtbar { opacity: 1 !important; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud" id="hud" style="display:none">
+  <h1>Fenster-Duo</h1>
+  <div class="rolle">Position: <span id="rolle" class="badge links">…</span></div>
+  <div><span class="dim">Fenster:</span> <span id="anzahl">1</span></div>
+  <div><span class="dim">Screen-Pos:</span> <span id="pos">?</span></div>
+  <div><span class="dim">Bälle:</span> <span id="ballinfo">–</span></div>
+  <div><span class="dim">Modus:</span> <span id="modus">–</span></div>
+  <div class="legende">Klick frei: Ball Richtung Klick-Hälfte · Ball ziehen: werfen · kurzer Klick auf Ball: entfernen<br>
+  Leertaste: Ball · G: Gravitation · P: Pause · + / −: Tempo · I halten: anziehen · O halten: abstoßen · X: alle weg<br>
+  H: Hilfe ein/aus · F5 in einem Fenster: alle laden neu, Spielstand wird gelöscht</div>
+</div>
+<div id="hinweis"></div>
+<script>
+(function () {
+  "use strict";
+
+  var K_PEER = "fd4.peers", K_ID = "fd4.id", K_HUE = "fd4.hue";
+  var K_BALL_PRE = "fd4.b.";
+  var K_RELOAD = "fd4.reload";
+  var K_TOK = "fd4.tok", K_RELAY = "fd4.relay", K_EVER = "fd4.ever";
+
+  var PUBLISH_MS = 120;
+  var STALE      = 1600;
+  var WRITE_MS   = 45;
+  var R          = 12;
+  var SIG_MS     = 4000;
+
+  function readJSON(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } }
+  function writeJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+  // Spielstand komplett löschen (Reload-Signal bleibt liegen, damit alle es lesen)
+  function wipeState() {
+    for (var i = localStorage.length - 1; i >= 0; i--) {
+      var k = localStorage.key(i);
+      if (k && k.indexOf("fd4.") === 0 && k !== K_RELOAD) localStorage.removeItem(k);
+    }
+  }
+
+  // Frisches Signal eines anderen Fensters? → Spielstand weg + selbst neu laden
+  function checkSignal() {
+    var sig = readJSON(K_RELOAD);
+    if (!sig || !sig.token) return false;
+    if (Date.now() - (sig.ts || 0) > SIG_MS) { localStorage.removeItem(K_RELOAD); return false; }
+    if (sig.token === sessionStorage.getItem(K_TOK)) return false;
+    sessionStorage.setItem(K_TOK, sig.token);
+    sessionStorage.setItem(K_RELAY, "1");
+    wipeState();
+    location.reload();
+    return true;
+  }
+
+  var myId, hue;
+
+  // ---------- Start ----------
+  (function start() {
+    if (checkSignal()) return;
+    var warRelay = sessionStorage.getItem(K_RELAY) === "1";
+    var warReload = sessionStorage.getItem(K_EVER) === "1" || warRelay;
+    sessionStorage.removeItem(K_RELAY);
+
+    myId = sessionStorage.getItem(K_ID);
+    if (!myId) { myId = "w" + Math.random().toString(36).slice(2, 9); sessionStorage.setItem(K_ID, myId); }
+    hue = parseInt(sessionStorage.getItem(K_HUE) || "", 10);
+    if (isNaN(hue)) { hue = Math.floor(Math.random() * 360); sessionStorage.setItem(K_HUE, String(hue)); }
+
+    (function cleanup() {
+      for (var i = localStorage.length - 1; i >= 0; i--) {
+        var k = localStorage.key(i);
+        if (k && k.indexOf("fd2.") === 0) localStorage.removeItem(k);
+      }
+    })();
+
+    if (warReload && !warRelay) {
+      // User-Reload: Spielstand weg + alle anderen Fenster nachziehen
+      wipeState();
+      var tok = "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      writeJSON(K_RELOAD, { ts: Date.now(), token: tok });
+      sessionStorage.setItem(K_TOK, tok);
+    }
+    sessionStorage.setItem(K_EVER, "1");
+  })();
+
+  // ---------- Peers ----------
+  var peers = {};
+  // Sichtbarer Clientbereich des Fensters in Screen-Koordinaten (ohne Titelleiste/Ränder),
+  // damit Bälle an den sichtbaren Kanten abprallen statt "unter" dem Canvas zu verschwinden.
+  function clientRect() {
+    var ow = window.outerWidth || window.innerWidth;
+    var oh = window.outerHeight || window.innerHeight;
+    var bw = Math.max(0, (ow - window.innerWidth) / 2);
+    var bh = Math.max(0, oh - window.innerHeight);
+    var top = Math.max(0, bh - bw);
+    return { x: window.screenX + bw, y: window.screenY + top, w: window.innerWidth, h: window.innerHeight };
+  }
+  function publish() {
+    peers = readJSON(K_PEER) || {};
+    var c = clientRect();
+    peers[myId] = { x: c.x, y: c.y, w: c.w, h: c.h, hue: hue, t: Date.now() };
+    writeJSON(K_PEER, peers);
+  }
+  publish();
+  setInterval(publish, PUBLISH_MS);
+  window.addEventListener("beforeunload", function () {
+    try {
+      var p = readJSON(K_PEER) || {};
+      delete p[myId];
+      localStorage.setItem(K_PEER, JSON.stringify(p));
+    } catch (e) {}
+  });
+
+  function windowsSorted() {
+    var list = {}, now = Date.now(), k;
+    for (k in peers) if (peers[k].t > now - 1500) list[k] = peers[k];
+    var arr = [];
+    for (k in list) {
+      var w = list[k];
+      arr.push({ id: k, hue: w.hue, self: k === myId, x: w.x, y: w.y, w: w.w, h: w.h });
+    }
+    arr.sort(function (a, b) { return a.x - b.x || (a.id < b.id ? -1 : 1); });
+    return arr;
+  }
+
+  // ---------- 2D-Besitz ----------
+  // Ball gehört dem Fenster, in dessen Rechteck er liegt. Bei Überlappung gewinnt
+  // ich selbst (wer den Ball sieht, simuliert ihn). Liegt er in gar keinem Fenster,
+  // holt ihn das nächstgelegene Fenster zurück.
+  function ownerOf(list, sx, sy) {
+    var best = null, i, w;
+    for (i = 0; i < list.length; i++) {
+      w = list[i];
+      if (sx >= w.x && sx < w.x + w.w && sy >= w.y && sy < w.y + w.h) {
+        if (w.self) return w;
+        if (!best || w.id < best.id) best = w;
+      }
+    }
+    if (best) return best;
+    var dn = 1e18;
+    for (i = 0; i < list.length; i++) {
+      w = list[i];
+      var dx = Math.max(w.x - sx, 0, sx - (w.x + w.w));
+      var dy = Math.max(w.y - sy, 0, sy - (w.y + w.h));
+      var d = dx * dx + dy * dy;
+      if (d < dn || (d === dn && w.id < best.id)) { dn = d; best = w; }
+    }
+    return best;
+  }
+
+  // Nachbar in Flugrichtung: y-Überlappung bevorzugt, sonst nächstliegende Kante
+  function nachbar(list, von, dir) {
+    var kand = [], i, w;
+    for (i = 0; i < list.length; i++) {
+      w = list[i];
+      if (w.id === von.id) continue;
+      if (dir > 0 && w.x >= von.x + von.w - 4) kand.push(w);
+      if (dir < 0 && w.x + w.w <= von.x + 4) kand.push(w);
+    }
+    if (!kand.length) return null;
+    function ueberlapp(w) {
+      return Math.min(von.y + von.h, w.y + w.h) - Math.max(von.y, w.y);
+    }
+    kand.sort(function (a, b) {
+      var ua = ueberlapp(a), ub = ueberlapp(b);
+      if (ub !== ua) return ub - ua;
+      return dir > 0 ? a.x - b.x : b.x - a.x;
+    });
+    return kand[0];
+  }
+
+  // ---------- Bälle (multiball, pro Ball ein Storage-Key) ----------
+  function scanBalls(cb) {
+    for (var i = 0; i < localStorage.length; i++) {
+      var key = localStorage.key(i);
+      if (key && key.indexOf(K_BALL_PRE) === 0) cb(key, readJSON(key));
+    }
+  }
+  function ballKey(id) { return K_BALL_PRE + id; }
+  function gid() { return "g" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+  function spawn(px, py, vx) {
+    var c = clientRect();
+    writeJSON(ballKey(gid()), {
+      sx: px !== undefined ? px : c.x + Math.min(90, c.w / 2),
+      sy: py !== undefined ? py : c.y + c.h / 2,
+      vx: vx !== undefined ? vx : (Math.random() < .5 ? -1 : 1) * (260 + Math.random() * 200),
+      vy: (Math.random() - .5) * 260,
+      hue: hue, simT: Date.now()
+    });
+  }
+
+  // ---------- canvas ----------
+  var cv = document.getElementById("c"), ctx = cv.getContext("2d");
+  function resize() {
+    cv.width = window.innerWidth * devicePixelRatio;
+    cv.height = window.innerHeight * devicePixelRatio;
+    ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  var wish = null, wunsch = {};
+
+  // ---------- gemeinsamer Modus (localStorage, beide Fenster gleich) ----------
+  var K_MODE = "fd4.mode";
+  var mode = readJSON(K_MODE) || { pause: false, gravity: false, speed: 1 };
+  function setMode(patch) {
+    for (var k in patch) mode[k] = patch[k];
+    mode.ts = Date.now();
+    writeJSON(K_MODE, mode);
+    if (patch.gravity !== undefined) flash(patch.gravity ? "Gravitation an" : "Gravitation aus");
+    if (patch.pause !== undefined) flash(patch.pause ? "Pause" : "Weiter");
+    if (patch.speed !== undefined) flash("Tempo " + (Math.round(mode.speed * 100) / 100) + "×");
+  }
+  var drag = null, magnet = 0, zielC = null, halteTasten = {};
+
+  function frame() {
+    requestAnimationFrame(frame);
+    if (checkSignal()) return;
+
+    var m2 = readJSON(K_MODE);
+    if (m2 && typeof m2 === "object" && m2.speed) mode = m2;
+
+    var list = windowsSorted(), meW = null, i;
+    for (i = 0; i < list.length; i++) if (list[i].self) meW = list[i];
+    if (!meW) { ctx.fillStyle = "#0b0f1a"; ctx.fillRect(0, 0, innerWidth, innerHeight); return; }
+
+    zielC = zielCenterOf(list, meW);
+    magnet = halteTasten.attract ? 1 : (halteTasten.repel ? -1 : 0);
+
+    // Ball, den ich gerade ziehe: Position + Wurfgeschwindigkeit schreiben
+    if (drag) {
+      var db = readJSON(drag.key);
+      if (db) {
+        db.sx = drag.px - drag.offX;
+        db.sy = drag.py - drag.offY;
+        db.vx = drag.vx; db.vy = drag.vy;
+        db.drag = myId;
+        db.simT = Date.now();
+        writeJSON(drag.key, strip(db));
+      } else { drag = null; }
+    }
+
+    var t = Date.now(), balls = [];
+
+    scanBalls(function (key, b) {
+      if (!b) { localStorage.removeItem(key); return; }
+      b._key = key;
+      var alt = t - (b.simT || 0) > STALE;
+      var bes = ownerOf(list, b.sx, b.sy);
+
+      if (alt) {
+        // eingefroren (Besitzer zu): zurückholen — sofort im eigenen Rect,
+        // sonst mit Zufalls-Jitter (nur für wirklich verwaiste Bälle)
+        if (bes && bes.self) { erzwingen(b, key, t, meW); return; }
+        if (!wunsch[key]) wunsch[key] = t + 800 + Math.random() * 900;
+        else if (t >= wunsch[key]) {
+          var neu = readJSON(key);
+          if (neu && Date.now() - (neu.simT || 0) > STALE) erzwingen(neu, key, Date.now(), meW);
+          delete wunsch[key];
+        }
+        return;
+      }
+
+      // wird gezogen? → der Ziehende schreibt, niemand simuliert
+      var dragMine = drag && drag.key === key;
+      b._owner = (b.drag && !dragMine) ? "drag" : dragMine ? "drag" : bes ? (bes.self ? true : false) : null;
+      balls.push(b);
+
+      if (b._owner === true) {
+        var uebergeben = simulate(b, list, meW);
+        if (uebergeben || t - (b._lw || 0) >= WRITE_MS) { writeJSON(b._key, strip(b)); b._lw = t; }
+      }
+    });
+
+    if (balls.length === 0) {
+      if (!wish) wish = t + 300 + Math.random() * 700;
+      else if (t >= wish) { spawn(); wish = null; }
+    } else wish = null;
+
+    draw(balls);
+    hud(balls, list, meW);
+  }
+
+  function erzwingen(b, key, t, win) {
+    b.sx = Math.max(win.x + R, Math.min(win.x + win.w - R, b.sx));
+    b.sy = Math.max(win.y + R, Math.min(win.y + win.h - R, b.sy));
+    b.simT = t;
+    writeJSON(key, strip(b));
+  }
+
+  function strip(b) {
+    return { sx: b.sx, sy: b.sy, vx: b.vx, vy: b.vy, hue: b.hue, simT: b.simT, drag: b.drag || null };
+  }
+
+  function projekt(b) {
+    var dt = Math.max(0, Math.min((Date.now() - b.simT) / 1000, 0.08));
+    var f = mode.pause ? 0 : (mode.speed || 1);
+    return { x: b.sx + b.vx * f * dt, y: b.sy + b.vy * f * dt };
+  }
+
+  // Deckt ein ANDERES Fenster die Stelle (sx, sy) ab? → dann darf der Ball durchfliegen
+  // (auch bei überlappenden Fensterrechtecken, z. B. durch Monitore mit anderer Skalierung)
+  function decktFenster(list, sy, sx) {
+    for (var i = 0; i < list.length; i++) {
+      var w = list[i];
+      if (w.self) continue;
+      if (sy >= w.y - R && sy <= w.y + w.h + R && sx >= w.x - R && sx <= w.x + w.w + R) return true;
+    }
+    return false;
+  }
+
+  // ---------- Physik ----------
+  // Verlorene Zeit (gedrosseltes Fenster) wird in 25ms-Substeps nachgeholt,
+  // damit der Ball auch bei 1s-Takt korrekt fliegt statt zu kriechen.
+  function simulate(b, list, meW) {
+    if (mode.pause) { b.simT = Date.now(); return false; }
+    var dtGes = Math.max(0, Math.min((Date.now() - b.simT) / 1000, 1));
+    var schritte = Math.max(1, Math.min(40, Math.ceil(dtGes / 0.025)));
+    var dt = dtGes / schritte;
+    var f = mode.speed || 1;
+    var L = meW.x, T = meW.y, Rw = meW.x + meW.w, Bo = meW.y + meW.h;
+
+    for (var s = 0; s < schritte; s++) {
+      // Magnet: anziehen (+) / abstoßen (−) Richtung nächstes Nachbarfenster-Zentrum
+      if (magnet && zielC) {
+        var dxm = zielC.x - b.sx, dym = zielC.y - b.sy;
+        var len = Math.hypot(dxm, dym) || 1;
+        b.vx += (dxm / len) * magnet * 600 * dt;
+        b.vy += (dym / len) * magnet * 600 * dt;
+      }
+      if (mode.gravity) b.vy += 700 * dt;
+
+      var sp2 = Math.hypot(b.vx, b.vy);
+      if (sp2 > 900) { b.vx = b.vx * 900 / sp2; b.vy = b.vy * 900 / sp2; }
+
+      b.sx += b.vx * f * dt;
+      b.sy += b.vy * f * dt;
+
+      if (b.sy < T + R) { b.sy = T + R; b.vy = Math.abs(b.vy); }
+      if (b.sy > Bo - R) { b.sy = Bo - R; b.vy = -Math.abs(b.vy); }
+
+      // y proportional ins Zielfenster abbilden (Fenster auf verschiedener Höhe)
+      function abbilden(ziel) {
+        var r = (b.sy - T) / (Bo - T);
+        r = Math.max(0, Math.min(1, isFinite(r) ? r : .5));
+        b.sy = ziel.y + R + r * (ziel.h - 2 * R);
+      }
+
+      if (b.sx > Rw - R) {
+        if (!decktFenster(list, b.sy, b.sx)) {
+          var nr = nachbar(list, meW, +1);
+          if (nr) { b.sx = nr.x + R; abbilden(nr); b.simT = Date.now(); writeJSON(b._key, strip(b)); return true; }
+          b.sx = Rw - R; b.vx = -Math.abs(b.vx);
+        }
+      }
+      if (b.sx < L + R) {
+        if (!decktFenster(list, b.sy, b.sx)) {
+          var nl = nachbar(list, meW, -1);
+          if (nl) { b.sx = nl.x + nl.w - R; abbilden(nl); b.simT = Date.now(); writeJSON(b._key, strip(b)); return true; }
+          b.sx = L + R; b.vx = Math.abs(b.vx);
+        }
+      }
+    }
+    b.simT = Date.now();
+    return false;
+  }
+
+  // Zentrum des nächsten anderen Fensters (Ziel für Anziehung/Abstoßung)
+  function zielCenterOf(list, meW) {
+    var best = null, bd = 1e18;
+    for (var i = 0; i < list.length; i++) {
+      var w = list[i];
+      if (w.self) continue;
+      var cx = w.x + w.w / 2, cy = w.y + w.h / 2;
+      var d = (cx - meW.x) * (cx - meW.x) + (cy - meW.y) * (cy - meW.y);
+      if (d < bd) { bd = d; best = { x: cx, y: cy }; }
+    }
+    return best;
+  }
+
+  // ---------- Rendering ----------
+  function draw(balls) {
+    ctx.fillStyle = "rgba(11,15,26,0.32)";
+    ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+    for (var i = 0; i < balls.length; i++) {
+      var b = balls[i];
+      var p = projekt(b);
+      var c0 = clientRect();
+      var x = p.x - c0.x, y = p.y - c0.y;
+      if (x < R - 1 || x > innerWidth - R + 1 || y < R - 1 || y > innerHeight - R + 1) continue;
+
+      var L = Math.max(0, 1 - x / 150) * (b.vx < 0 ? 1 : .25);
+      var Rr = Math.max(0, 1 - (innerWidth - x) / 150) * (b.vx > 0 ? 1 : .25);
+      if (L > .05) kante("l", Math.min(1, L), b.hue);
+      if (Rr > .05) kante("r", Math.min(1, Rr), b.hue);
+
+      var g = ctx.createRadialGradient(x, y, 2, x, y, R * 2.4);
+      g.addColorStop(0, "hsla(" + b.hue + ",90%,72%,1)");
+      g.addColorStop(.5, "hsla(" + b.hue + ",90%,55%,.5)");
+      g.addColorStop(1, "hsla(" + b.hue + ",90%,50%,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, R * 2.4, 0, 7); ctx.fill();
+      ctx.fillStyle = "hsl(" + b.hue + ",90%,72%)";
+      ctx.beginPath(); ctx.arc(x, y, R, 0, 7); ctx.fill();
+
+      ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = 1.5;
+      var s2 = Math.sign(b.vx) || 1;
+      ctx.beginPath();
+      ctx.moveTo(x - s2 * R * 1.9, y); ctx.lineTo(x - s2 * R * 1.1, y);
+      ctx.stroke();
+    }
+  }
+
+  function kante(side, st, h) {
+    var W = innerWidth, H = innerHeight;
+    var grad = side === "l"
+      ? ctx.createLinearGradient(0, 0, 200, 0)
+      : ctx.createLinearGradient(W, 0, W - 200, 0);
+    grad.addColorStop(0, "hsla(" + h + ",90%,60%," + (.5 * st) + ")");
+    grad.addColorStop(1, "hsla(" + h + ",90%,60%,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(side === "l" ? 0 : W - 200, 0, 200, H);
+  }
+
+  var elR = document.getElementById("rolle"), elA = document.getElementById("anzahl"),
+      elP = document.getElementById("pos"), elB = document.getElementById("ballinfo"),
+      elM = document.getElementById("modus");
+
+  function hud(balls, list, meW) {
+    var n = list.length;
+    var linksFrei = true, rechtsFrei = true, i, w;
+    for (i = 0; i < list.length; i++) {
+      w = list[i];
+      if (w.id === meW.id) continue;
+      if (w.x + w.w <= meW.x + 4) linksFrei = false;
+      if (w.x >= meW.x + meW.w - 4) rechtsFrei = false;
+    }
+    elA.textContent = n + (n === 2 ? " (Duo)" : n > 2 ? " (Gruppe)" : " (Solo)");
+    elP.textContent = Math.round(window.screenX) + "," + Math.round(window.screenY);
+    elR.textContent = n === 1 ? "Solo" : (!linksFrei && rechtsFrei) ? "links" : (linksFrei && !rechtsFrei) ? "rechts" : "Mitte";
+    elR.className = "badge " + ((!linksFrei && rechtsFrei) ? "links" : (linksFrei && !rechtsFrei) ? "rechts" : "mitte");
+
+    var hier = 0, wo = 0;
+    for (i = 0; i < balls.length; i++) {
+      if (balls[i]._owner === true) hier++; else wo++;
+    }
+    elB.textContent = balls.length + " · hier " + hier + " · and. " + wo;
+
+    var mods = [];
+    if (mode.pause) mods.push("Pause");
+    if (mode.gravity) mods.push("Gravitation");
+    if (magnet > 0) mods.push("Anziehung");
+    if (magnet < 0) mods.push("Abstoßung");
+    mods.push("Tempo " + (Math.round((mode.speed || 1) * 100) / 100) + "×");
+    elM.textContent = mods.join(" · ");
+  }
+
+  // ---------- Input ----------
+  window.addEventListener("keydown", function (e) {
+    var k = (e.key || "").toLowerCase();
+    if (e.code === "Space") { e.preventDefault(); schuss(); return; }
+    if (k === "h") {
+      var h = document.getElementById("hud");
+      h.style.display = h.style.display === "none" ? "block" : "none";
+      return;
+    }
+    if (k === "g") setMode({ gravity: !mode.gravity });
+    else if (k === "p") setMode({ pause: !mode.pause });
+    else if (k === "+" || k === "=") setMode({ speed: Math.min(3, (mode.speed || 1) * 1.25) });
+    else if (k === "-" || k === "_") setMode({ speed: Math.max(0.25, (mode.speed || 1) / 1.25) });
+    else if (k === "x") alleWeg();
+    else if (k === "i") halteTasten.attract = true;
+    else if (k === "o") halteTasten.repel = true;
+  });
+  window.addEventListener("keyup", function (e) {
+    var k = (e.key || "").toLowerCase();
+    if (k === "i") halteTasten.attract = false;
+    if (k === "o") halteTasten.repel = false;
+  });
+
+  function alleWeg() {
+    scanBalls(function (key) { localStorage.removeItem(key); });
+    flash("Alle Bälle entfernt");
+  }
+
+  window.addEventListener("pointermove", function (e) {
+    if (!drag) return;
+    var c = clientRect();
+    var cx = c.x + e.clientX, cy = c.y + e.clientY;
+    var now = Date.now(), dt = Math.max(8, now - drag.t) / 1000;
+    drag.vx = drag.vx * 0.3 + ((cx - drag.px) / dt) * 0.7;
+    drag.vy = drag.vy * 0.3 + ((cy - drag.py) / dt) * 0.7;
+    drag.px = cx; drag.py = cy; drag.t = now;
+  });
+  window.addEventListener("pointerup", function () {
+    if (!drag) return;
+    var key = drag.key;
+    var dauer = Date.now() - drag.t0;
+    var weg = Math.hypot(drag.px - drag.sx0, drag.py - drag.sy0);
+    if (dauer < 250 && weg < 6) {
+      localStorage.removeItem(key);
+      flash("Ball entfernt");
+    } else {
+      var db = readJSON(key);
+      if (db) {
+        var sp = Math.hypot(drag.vx, drag.vy);
+        if (sp > 900) { drag.vx = drag.vx * 900 / sp; drag.vy = drag.vy * 900 / sp; }
+        db.vx = drag.vx; db.vy = drag.vy;
+        db.drag = null;
+        db.simT = Date.now();
+        writeJSON(key, db);
+      }
+    }
+    drag = null;
+  });
+  window.addEventListener("pointerdown", function (e) {
+    if (e.target !== cv) return;
+    var c = clientRect();
+    var cx = c.x + e.clientX, cy = c.y + e.clientY;
+    var treffer = null, bx = 0, by = 0;
+    scanBalls(function (key, b) {
+      if (treffer || !b) return;
+      var dt = Math.max(0, Math.min((Date.now() - b.simT) / 1000, 0.08));
+      var px = b.sx + b.vx * dt, py = b.sy + b.vy * dt;
+      if (Math.hypot(px - cx, py - cy) <= R * 2) { treffer = key; bx = px; by = py; }
+    });
+    if (treffer) {
+      drag = { key: treffer, offX: cx - bx, offY: cy - by, px: cx, py: cy, vx: 0, vy: 0,
+               t: Date.now(), t0: Date.now(), sx0: cx, sy0: cy };
+      return;
+    }
+    schuss(cx, cy);
+  });
+
+  function schuss(px, py) {
+    var c = clientRect();
+    var zx = px !== undefined ? px : c.x + Math.min(90, c.w / 2);
+    var dir = zx >= c.x + c.w / 2 ? 1 : -1; // linke Hälfte: nach links, rechte: nach rechts
+    spawn(px, py, dir * (260 + Math.random() * 200));
+  }
+
+  var flashTO = null;
+  function flash(t) {
+    var el = document.getElementById("hinweis");
+    el.textContent = t;
+    el.classList.add("sichtbar");
+    clearTimeout(flashTO);
+    flashTO = setTimeout(function () { el.classList.remove("sichtbar"); }, 1600);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

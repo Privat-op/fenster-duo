@@ -1,0 +1,7 @@
+# Test-/Tool-Artefakte
+.playwright-mcp/
+*.log
+
+# Betriebssystem
+Thumbs.db
+Desktop.ini
